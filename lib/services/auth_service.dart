@@ -5,31 +5,34 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 class AuthService {
   static const _storage = FlutterSecureStorage();
   static const _tokenKey = 'auth_token';
+  static const _nomeKey = 'auth_nome';
+  static const _perfilKey = 'auth_perfil';
+  static const _empresaIdKey = 'auth_empresa_id';
 
-  ///  Colocar a url do web 1
 
-  static const String _baseUrl = 'https://SUA-API-AQUI.com';
+  static const String _baseUrl = 'http://192.168.1.121:8080';
 
-  /// Erro é sempre genérico, sem dizer se foi usuário ou senha
+  //  Enquanto a API não estiver rodando, deixar true pra testar o fluxo.
+  // Quando a API  estiver funcionando , mudar para false.
+  static const bool useMock = true;
 
+  /// Tenta fazer login. Retorna true se deu certo, false se falhou.
+  /// Erro é sempre genérico, sem dizer se foi usuário ou senha.
   Future<bool> login(String usuario, String senha) async {
-
-    /// MODO SIMULADO — remover quando a API real (W01) estiver pronta
-
-    const bool useMock = true;
     if (useMock) {
-      await Future.delayed(const Duration(seconds: 1)); // simula rede
+      await Future.delayed(const Duration(seconds: 1));
       if (usuario == 'admin' && senha == '1234') {
         await _storage.write(key: _tokenKey, value: 'token-fake-123');
+        await _storage.write(key: _nomeKey, value: 'Usuário Teste');
+        await _storage.write(key: _perfilKey, value: 'SUPERADMIN');
         return true;
       }
       return false;
     }
-    /// 🔧 FIM DO MODO SIMULADO
 
     try {
       final response = await http.post(
-        Uri.parse('$_baseUrl/login'),
+        Uri.parse('$_baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'usuario': usuario, 'senha': senha}),
       );
@@ -39,11 +42,20 @@ class AuthService {
         final token = data['token'] as String?;
         if (token != null) {
           await _storage.write(key: _tokenKey, value: token);
+          await _storage.write(key: _nomeKey, value: data['nome'] ?? '');
+          await _storage.write(key: _perfilKey, value: data['perfil'] ?? '');
+          if (data['empresaId'] != null) {
+            await _storage.write(
+              key: _empresaIdKey,
+              value: data['empresaId'].toString(),
+            );
+          }
           return true;
         }
       }
       return false;
     } catch (e) {
+      // Falha de rede, timeout, API fora do ar etc. — erro genérico
       return false;
     }
   }
@@ -59,12 +71,25 @@ class AuthService {
     return await _storage.read(key: _tokenKey);
   }
 
-  /// Remove o token salvo (logout).
-  Future<void> logout() async {
-    await _storage.delete(key: _tokenKey);
+  /// Retorna o nome salvo do usuário logado.
+  Future<String?> getNome() async {
+    return await _storage.read(key: _nomeKey);
   }
 
-  /// Chamado quando a API responde que o token expirou.
+  /// Retorna o perfil salvo (SUPERADMIN, RH_ADMIN, etc).
+  Future<String?> getPerfil() async {
+    return await _storage.read(key: _perfilKey);
+  }
+
+  /// Remove todos os dados de sessão salvos (logout).
+  Future<void> logout() async {
+    await _storage.delete(key: _tokenKey);
+    await _storage.delete(key: _nomeKey);
+    await _storage.delete(key: _perfilKey);
+    await _storage.delete(key: _empresaIdKey);
+  }
+
+  /// Chamado quando a API responde que o token expirou (401/403).
   /// Remove só o token, mantendo dados locais (fila de marcações etc).
   Future<void> clearExpiredToken() async {
     await _storage.delete(key: _tokenKey);
