@@ -14,7 +14,7 @@ class AuthService {
 
   //  Enquanto a API não estiver rodando, deixar true pra testar o fluxo.
   // Quando a API  estiver funcionando , mudar para false.
-  static const bool useMock = true;
+  static const bool useMock = false;
 
   /// Tenta fazer login. Retorna true se deu certo, false se falhou.
   /// Erro é sempre genérico, sem dizer se foi usuário ou senha.

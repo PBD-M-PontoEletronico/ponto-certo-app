@@ -28,13 +28,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _confirmarLogout() async {
-    // TODO: quando a fila de marcações (APP 07) existir, checar aqui
-    // se há marcações pendentes e avisar no texto da confirmação.
+    // 🔧 TAPA-BURACO PARA DEMONSTRAÇÃO — remover quando a fila real
+    // de marcações (APP 07 / sqflite) existir. Por enquanto simula
+    // que existem 2 marcações pendentes de envio.
+    const int marcacoesPendentesMock = 2;
+
+    final temPendencias = marcacoesPendentesMock > 0;
+    final mensagem = temPendencias
+        ? 'Você tem $marcacoesPendentesMock marcação(ões) que ainda não foram '
+        'enviadas ao servidor. Elas serão enviadas assim que você logar '
+        'novamente com internet. Deseja mesmo sair?'
+        : 'Tem certeza que deseja sair da sua conta?';
+
     final confirmou = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Sair'),
-        content: const Text('Tem certeza que deseja sair da sua conta?'),
+        content: Text(mensagem),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
