@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 import 'login_screen.dart';
 import 'home_screen.dart';
 
@@ -12,6 +13,7 @@ class SplashScreen extends StatefulWidget {
 
 class _SplashScreenState extends State<SplashScreen> {
   final AuthService _authService = AuthService();
+  final SyncService _syncService = SyncService();
 
   @override
   void initState() {
@@ -20,15 +22,21 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _decidirRota() async {
-    // Pequeno delay só pra dar tempo da splash aparecer (evita "flash" na tela)
-    await Future.delayed(const Duration(milliseconds: 600));
-
     final temSessao = await _authService.hasSession();
+
+    if (temSessao) {
+      // Já logado antes: tenta sincronizar (se tiver internet), mas
+      // segue para a Home de qualquer forma, mesmo offline ou se
+      // a sincronização falhar — usando os dados já salvos localmente.
+      await _syncService.sincronizar();
+    } else {
+      // Delay só pra dar tempo da splash aparecer antes do login
+      await Future.delayed(const Duration(milliseconds: 600));
+    }
 
     if (!mounted) return;
 
     if (temSessao) {
-      // Já logado antes — pula direto pro ponto, mesmo offline
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const HomeScreen()),
       );
