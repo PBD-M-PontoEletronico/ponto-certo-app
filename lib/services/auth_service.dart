@@ -125,4 +125,9 @@ class AuthService {
   Future<void> clearExpiredToken() async {
     await _storage.delete(key: _tokenKey);
   }
+
+  /// Retorna o empresaId salvo (null para SUPERADMIN, que não tem empresa).
+  Future<String?> getEmpresaId() async {
+    return await _storage.read(key: _empresaIdKey);
+  }
 }

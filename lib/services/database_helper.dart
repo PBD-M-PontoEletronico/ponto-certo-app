@@ -88,7 +88,7 @@ class DatabaseHelper {
   /// meio do processo, a transação é revertida automaticamente).
   Future<void> salvarSincronizacaoCompleta({
     required Map<String, dynamic> funcionario,
-    required Map<String, dynamic> setor,
+    required List<Map<String, dynamic>> setores,
     required Map<String, dynamic> politicaSetor,
     required List<Map<String, dynamic>> escala,
     required List<Map<String, dynamic>> marcacoesRecentes,
@@ -105,7 +105,11 @@ class DatabaseHelper {
       await txn.delete('marcacao_recente');
 
       await txn.insert('funcionario', funcionario);
-      await txn.insert('setor', setor);
+
+      for (final setor in setores) {
+        await txn.insert('setor', setor);
+      }
+
       await txn.insert('politica_setor', politicaSetor);
 
       for (final dia in escala) {
@@ -149,10 +153,11 @@ class DatabaseHelper {
     return result.isEmpty ? null : result.first;
   }
 
-  Future<Map<String, dynamic>?> getSetor() async {
+  /// Retorna todos os setores do funcionário (ele pode estar alocado
+  /// em mais de um simultaneamente).
+  Future<List<Map<String, dynamic>>> getSetores() async {
     final db = await database;
-    final result = await db.query('setor', limit: 1);
-    return result.isEmpty ? null : result.first;
+    return await db.query('setor');
   }
 
   Future<Map<String, dynamic>?> getPoliticaSetor() async {

@@ -18,7 +18,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
   String? _nome;
-  String? _setorNome;
+  List<String> _setoresNomes = [];
   DateTime? _ultimaSincronizacao;
   bool _sincronizando = false;
 
@@ -30,13 +30,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _carregarDadosLocais() async {
     final nome = await _authService.getNome();
-    final setor = await _dbHelper.getSetor();
+    final setores = await _dbHelper.getSetores();
     final ultimaSync = await _dbHelper.getUltimaSincronizacao();
 
     if (mounted) {
       setState(() {
         _nome = nome;
-        _setorNome = setor != null ? setor['nome'] as String : null;
+        _setoresNomes = setores.map((s) => s['nome'] as String).toList();
         _ultimaSincronizacao = ultimaSync;
       });
     }
@@ -152,9 +152,16 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: const TextStyle(fontSize: 20),
                     ),
                     const SizedBox(height: 4),
-                    if (_setorNome != null)
+                    if (_setoresNomes.isNotEmpty)
                       Text(
-                        'Setor: $_setorNome',
+                        _setoresNomes.length == 1
+                            ? 'Setor: ${_setoresNomes.first}'
+                            : 'Setores: ${_setoresNomes.join(', ')}',
+                        style: TextStyle(color: Colors.grey.shade700),
+                      )
+                    else
+                      Text(
+                        'Sem setor alocado',
                         style: TextStyle(color: Colors.grey.shade700),
                       ),
                     const SizedBox(height: 8),

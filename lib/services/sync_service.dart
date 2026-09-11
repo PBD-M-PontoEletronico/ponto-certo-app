@@ -1,7 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
-import 'dart:io';
 import 'conectivity_service.dart' show ConnectivityService;
 import 'database_helper.dart';
 
@@ -32,36 +32,59 @@ class SyncService {
     }
 
     try {
-      // --- 1. Funcionário: já vem salvo do login (auth_service) ---
+      final headers = {'Authorization': 'Bearer $token'};
+
+      // --- 1. Buscar as alocações do próprio funcionário logado ---
+      // Endpoint liberado para qualquer perfil autenticado (usa o token
+      // para saber quem é o usuário, via TenantContext no backend).
+      List<Map<String, dynamic>> setoresMaps = [];
+      String funcionarioId = '';
+      String matricula = '';
+      String cargo = '';
+
+      final responseAlocacoes = await http.get(
+        Uri.parse('$_baseUrl/me/alocacoes'),
+        headers: headers,
+      );
+
+      if (responseAlocacoes.statusCode == 200) {
+        final lista = jsonDecode(responseAlocacoes.body) as List;
+
+        if (lista.isNotEmpty) {
+          final primeiraAlocacao = lista.first as Map<String, dynamic>;
+          final usuarioInfo = primeiraAlocacao['usuario'] as Map<String, dynamic>;
+          funcionarioId = usuarioInfo['id'] as String? ?? '';
+          matricula = usuarioInfo['matricula'] as String? ?? '';
+          cargo = usuarioInfo['cargo'] as String? ?? '';
+        }
+
+        for (final item in lista) {
+          final dataFim = item['dataFim'];
+          if (dataFim == null) {
+            final setor = item['setor'] as Map<String, dynamic>;
+            setoresMaps.add({'id': setor['id'], 'nome': setor['nome']});
+          }
+        }
+      }
+      // Se der 401/403 aqui: algo mudou na segurança do endpoint, avisar.
+
       final nome = await _authService.getNome() ?? '';
-      final usuario = await _authService.getUsuario() ?? '';
       final perfil = await _authService.getPerfil() ?? '';
-      final setoresIds = await _authService.getSetoresIds();
+      final usuarioLogin = await _authService.getUsuario() ?? '';
+
+      final setoresIds = setoresMaps.map((s) => s['id'] as String).toList();
 
       final funcionarioMap = {
-        'id': usuario, // provisório: API ainda não expõe o id do usuário no login
+        'id': funcionarioId,
         'nome': nome,
-        'usuario': usuario,
+        'usuario': usuarioLogin,
         'perfil': perfil,
         'setoresIds': setoresIds.join(','),
       };
 
-      // --- 2. Setor: REAL, busca o primeiro setor da lista via API ---
-      Map<String, dynamic> setorMap = {'id': '', 'nome': 'Sem setor'};
-      if (setoresIds.isNotEmpty) {
-        final response = await http.get(
-          Uri.parse('$_baseUrl/setores/${setoresIds.first}'),
-          headers: {'Authorization': 'Bearer $token'},
-        );
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          setorMap = {'id': data['id'], 'nome': data['nome']};
-        }
-      }
-
       // --- 3. Política do setor: SIMBÓLICO (API não tem endpoint ainda) ---
       final politicaMap = {
-        'setorId': setorMap['id'],
+        'setorId': setoresIds.isNotEmpty ? setoresIds.first : '',
         'toleranciaMinutos': 10,
         'exigeSelfie': 1,
         'raioMetros': 100,
@@ -99,7 +122,7 @@ class SyncService {
       // --- Grava tudo em uma única transação (tudo ou nada) ---
       await _dbHelper.salvarSincronizacaoCompleta(
         funcionario: funcionarioMap,
-        setor: setorMap,
+        setores: setoresMaps,
         politicaSetor: politicaMap,
         escala: escalaMock,
         marcacoesRecentes: marcacoesMock,
