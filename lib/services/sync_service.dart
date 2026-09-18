@@ -7,19 +7,15 @@ import 'database_helper.dart';
 
 /// Orquestra a sincronização de dados locais (APP 02).
 /// Busca dados reais da API quando existem, e usa valores simbólicos
-/// (mock) para o que ainda não foi implementado no backend
-/// (política completa, escala, marcações recentes).
+/// (mock) só para o que ainda não foi implementado no backend
+/// (marcações recentes).
 class SyncService {
   final AuthService _authService = AuthService();
   final ConnectivityService _connectivityService = ConnectivityService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
-  // 🔧 Mesma URL base usada no auth_service.dart
   static const String _baseUrl = 'http://192.168.1.121:8080';
 
-  /// Executa a sincronização completa. Retorna true se conseguiu
-  /// atualizar os dados, false se não tinha conexão (nesse caso o
-  /// app segue usando o que já está salvo localmente, sem erro).
   Future<bool> sincronizar() async {
     final online = await _connectivityService.isOnline();
     if (!online) {
@@ -35,12 +31,17 @@ class SyncService {
       final headers = {'Authorization': 'Bearer $token'};
 
       // --- 1. Buscar as alocações do próprio funcionário logado ---
-      // Endpoint liberado para qualquer perfil autenticado (usa o token
-      // para saber quem é o usuário, via TenantContext no backend).
+      final hoje = DateTime.now();
+      final hojeSemHora = DateTime(hoje.year, hoje.month, hoje.day);
+
       List<Map<String, dynamic>> setoresMaps = [];
+      final escalasPorId = <String, Map<String, dynamic>>{};
+      final turnosPorId = <String, Map<String, dynamic>>{};
+      Map<String, dynamic>? politicaMap;
+
       String funcionarioId = '';
-      String matricula = '';
-      String cargo = '';
+      String matricula = ''; // ⚠️ buscado mas não persistido ainda
+      String cargo = '';     // ⚠️ buscado mas não persistido ainda
 
       final responseAlocacoes = await http.get(
         Uri.parse('$_baseUrl/me/alocacoes'),
@@ -59,10 +60,56 @@ class SyncService {
         }
 
         for (final item in lista) {
-          final dataFim = item['dataFim'];
-          if (dataFim == null) {
-            final setor = item['setor'] as Map<String, dynamic>;
-            setoresMaps.add({'id': setor['id'], 'nome': setor['nome']});
+          final dataInicioStr = item['dataInicio'] as String?;
+          final dataFimStr = item['dataFim'] as String?;
+          if (dataInicioStr == null || dataFimStr == null) continue;
+
+          final dataInicio = DateTime.tryParse(dataInicioStr);
+          final dataFim = DateTime.tryParse(dataFimStr);
+          if (dataInicio == null || dataFim == null) continue;
+
+          // Alocação "ativa hoje": dataInicio <= hoje <= dataFim
+          // (dataFim agora é sempre obrigatória — ciclos mensais).
+          final ativa = !hojeSemHora.isBefore(dataInicio) &&
+              !hojeSemHora.isAfter(dataFim);
+          if (!ativa) continue;
+
+          final setor = item['setor'] as Map<String, dynamic>;
+          setoresMaps.add({'id': setor['id'], 'nome': setor['nome']});
+
+          // Política real: usa a do primeiro setor ativo encontrado.
+          // Funcionário alocado em mais de um setor só guarda uma
+          // política local por enquanto — revisar se isso virar
+          // problema prático (ex: bater ponto em setor diferente
+          // do "principal").
+          politicaMap ??= {
+            'setorId': setor['id'] as String,
+            'raioMetros': setor['raioMetros'] as int,
+            'exigirSelfie': (setor['exigirSelfie'] as bool) ? 1 : 0,
+            'politicaForaPerimetro': setor['politicaForaPerimetro'] as String,
+            'ignorarLocalizacao': (setor['ignorarLocalizacao'] as bool) ? 1 : 0,
+          };
+
+          final escala = item['escala'] as Map<String, dynamic>?;
+          if (escala != null) {
+            final escalaId = escala['id'] as String;
+            escalasPorId[escalaId] = {
+              'id': escalaId,
+              'nome': escala['nome'] ?? '',
+              'modelo': escala['modelo'] ?? '',
+            };
+
+            final turnos = escala['turnos'] as List? ?? [];
+            for (final turno in turnos) {
+              final turnoId = turno['id'] as String;
+              turnosPorId[turnoId] = {
+                'id': turnoId,
+                'escalaId': escalaId,
+                'horaInicio': turno['horaInicio'] ?? '',
+                'horaFim': turno['horaFim'] ?? '',
+                'intervaloMinutos': turno['intervaloMinutos'] ?? 0,
+              };
+            }
           }
         }
       }
@@ -82,28 +129,7 @@ class SyncService {
         'setoresIds': setoresIds.join(','),
       };
 
-      // --- 3. Política do setor: SIMBÓLICO (API não tem endpoint ainda) ---
-      final politicaMap = {
-        'setorId': setoresIds.isNotEmpty ? setoresIds.first : '',
-        'toleranciaMinutos': 10,
-        'exigeSelfie': 1,
-        'raioMetros': 100,
-      };
-
-      // --- 4. Escala: SIMBÓLICO ---
-      final hoje = DateTime.now();
-      final escalaMock = List.generate(5, (i) {
-        final dia = hoje.add(Duration(days: i));
-        final dataStr =
-            '${dia.year}-${dia.month.toString().padLeft(2, '0')}-${dia.day.toString().padLeft(2, '0')}';
-        return {
-          'data': dataStr,
-          'horaInicio': '08:00',
-          'horaFim': '17:00',
-        };
-      });
-
-      // --- 5. Marcações recentes: SIMBÓLICO ---
+      // --- 2. Marcações recentes: SIMBÓLICO (endpoint não existe) ---
       final marcacoesMock = [
         {
           'dataHora': DateTime.now()
@@ -113,7 +139,8 @@ class SyncService {
         },
       ];
 
-      // --- 6. Hora do servidor: REAL, pega do header HTTP da última resposta ---
+      // --- 3. Hora do servidor: pega do header HTTP de uma chamada
+      // incidental ao /auth/login (gambiarra — ideal seria um GET /hora) ---
       final horaServidorResponse = await http.get(Uri.parse('$_baseUrl/auth/login'));
       final headerData = horaServidorResponse.headers['date'];
       final horaServidor =
@@ -124,15 +151,17 @@ class SyncService {
         funcionario: funcionarioMap,
         setores: setoresMaps,
         politicaSetor: politicaMap,
-        escala: escalaMock,
+        escalas: escalasPorId.values.toList(),
+        turnos: turnosPorId.values.toList(),
         marcacoesRecentes: marcacoesMock,
         horaServidor: horaServidor,
       );
 
       return true;
-    } catch (e) {
-      // Qualquer erro no meio do processo: NÃO grava nada (a transação
-      // do database_helper já garante isso), e retorna false.
+    } catch (e, stack) {
+      print('=== ERRO NA SINCRONIZAÇÃO ===');
+      print(e);
+      print(stack);
       return false;
     }
   }

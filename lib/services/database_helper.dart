@@ -17,8 +17,9 @@ class DatabaseHelper {
     final path = join(await getDatabasesPath(), 'ponto_certo.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 3,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -43,17 +44,31 @@ class DatabaseHelper {
     await db.execute('''
       CREATE TABLE politica_setor (
         setorId TEXT PRIMARY KEY,
-        toleranciaMinutos INTEGER NOT NULL,
-        exigeSelfie INTEGER NOT NULL,
-        raioMetros INTEGER NOT NULL
+        raioMetros INTEGER NOT NULL,
+        exigirSelfie INTEGER NOT NULL,
+        politicaForaPerimetro TEXT NOT NULL,
+        ignorarLocalizacao INTEGER NOT NULL
+      )
+    ''');
+
+    // Escala real: modelo + turnos (não é mais "5 dias com hora fixa").
+    // A projeção dia-a-dia completa depende de um endpoint futuro
+    // (/me/agenda), ainda não implementado no backend.
+    await db.execute('''
+      CREATE TABLE escala (
+        id TEXT PRIMARY KEY,
+        nome TEXT,
+        modelo TEXT
       )
     ''');
 
     await db.execute('''
-      CREATE TABLE escala_dia (
-        data TEXT PRIMARY KEY,
+      CREATE TABLE turno (
+        id TEXT PRIMARY KEY,
+        escalaId TEXT NOT NULL,
         horaInicio TEXT NOT NULL,
-        horaFim TEXT NOT NULL
+        horaFim TEXT NOT NULL,
+        intervaloMinutos INTEGER NOT NULL
       )
     ''');
 
@@ -72,36 +87,84 @@ class DatabaseHelper {
     ''');
   }
 
+  /// Banco local é só um cache reconstruído a cada sincronização —
+  /// não guarda nada que precise ser preservado entre versões. Por
+  /// isso toda migração aqui é só dropar as tabelas que mudaram e
+  /// recriar do zero.
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // A tabela antiga 'escala_dia' (mock de 5 dias fixos) foi substituída
+      // por 'escala' + 'turno', que refletem o modelo real da API.
+      await db.execute('DROP TABLE IF EXISTS escala_dia');
+      await db.execute('''
+        CREATE TABLE escala (
+          id TEXT PRIMARY KEY,
+          nome TEXT,
+          modelo TEXT
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE turno (
+          id TEXT PRIMARY KEY,
+          escalaId TEXT NOT NULL,
+          horaInicio TEXT NOT NULL,
+          horaFim TEXT NOT NULL,
+          intervaloMinutos INTEGER NOT NULL
+        )
+      ''');
+    }
+
+    if (oldVersion < 3) {
+      // politica_setor passou a guardar os campos reais da API em vez
+      // do mock (toleranciaMinutos saiu; entraram politicaForaPerimetro
+      // e ignorarLocalizacao).
+      await db.execute('DROP TABLE IF EXISTS politica_setor');
+      await db.execute('''
+        CREATE TABLE politica_setor (
+          setorId TEXT PRIMARY KEY,
+          raioMetros INTEGER NOT NULL,
+          exigirSelfie INTEGER NOT NULL,
+          politicaForaPerimetro TEXT NOT NULL,
+          ignorarLocalizacao INTEGER NOT NULL
+        )
+      ''');
+    }
+  }
+
   /// Apaga TODOS os dados locais (usado no logout).
   Future<void> limparTudo() async {
     final db = await database;
     await db.delete('funcionario');
     await db.delete('setor');
     await db.delete('politica_setor');
-    await db.delete('escala_dia');
+    await db.delete('escala');
+    await db.delete('turno');
     await db.delete('marcacao_recente');
     await db.delete('metadata_sync');
   }
 
   /// Salva um snapshot completo de sincronização como uma ÚNICA
-  /// transação: ou tudo é gravado, ou nada é (em caso de erro no
-  /// meio do processo, a transação é revertida automaticamente).
+  /// transação: ou tudo é gravado, ou nada é.
+  /// [politicaSetor] pode ser null quando o funcionário não tem
+  /// nenhum setor ativo no momento — nesse caso, nada é gravado
+  /// nessa tabela.
   Future<void> salvarSincronizacaoCompleta({
     required Map<String, dynamic> funcionario,
     required List<Map<String, dynamic>> setores,
-    required Map<String, dynamic> politicaSetor,
-    required List<Map<String, dynamic>> escala,
+    required Map<String, dynamic>? politicaSetor,
+    required List<Map<String, dynamic>> escalas,
+    required List<Map<String, dynamic>> turnos,
     required List<Map<String, dynamic>> marcacoesRecentes,
     required String horaServidor,
   }) async {
     final db = await database;
 
     await db.transaction((txn) async {
-      // Limpa dados antigos antes de gravar os novos
       await txn.delete('funcionario');
       await txn.delete('setor');
       await txn.delete('politica_setor');
-      await txn.delete('escala_dia');
+      await txn.delete('escala');
+      await txn.delete('turno');
       await txn.delete('marcacao_recente');
 
       await txn.insert('funcionario', funcionario);
@@ -110,10 +173,18 @@ class DatabaseHelper {
         await txn.insert('setor', setor);
       }
 
-      await txn.insert('politica_setor', politicaSetor);
 
-      for (final dia in escala) {
-        await txn.insert('escala_dia', dia);
+
+      if (politicaSetor != null) {
+        await txn.insert('politica_setor', politicaSetor);
+      }
+
+      for (final escala in escalas) {
+        await txn.insert('escala', escala);
+      }
+
+      for (final turno in turnos) {
+        await txn.insert('turno', turno);
       }
 
       for (final marcacao in marcacoesRecentes) {
@@ -134,8 +205,6 @@ class DatabaseHelper {
     });
   }
 
-  /// Retorna a data/hora da última sincronização bem-sucedida, ou null
-  /// se nunca sincronizou.
   Future<DateTime?> getUltimaSincronizacao() async {
     final db = await database;
     final result = await db.query(
@@ -153,8 +222,6 @@ class DatabaseHelper {
     return result.isEmpty ? null : result.first;
   }
 
-  /// Retorna todos os setores do funcionário (ele pode estar alocado
-  /// em mais de um simultaneamente).
   Future<List<Map<String, dynamic>>> getSetores() async {
     final db = await database;
     return await db.query('setor');
@@ -166,9 +233,14 @@ class DatabaseHelper {
     return result.isEmpty ? null : result.first;
   }
 
-  Future<List<Map<String, dynamic>>> getEscala() async {
+  Future<List<Map<String, dynamic>>> getEscalas() async {
     final db = await database;
-    return await db.query('escala_dia', orderBy: 'data ASC');
+    return await db.query('escala');
+  }
+
+  Future<List<Map<String, dynamic>>> getTurnos() async {
+    final db = await database;
+    return await db.query('turno');
   }
 
   Future<List<Map<String, dynamic>>> getMarcacoesRecentes() async {

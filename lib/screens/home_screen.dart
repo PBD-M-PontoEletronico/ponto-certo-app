@@ -16,6 +16,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final AuthService _authService = AuthService();
   final SyncService _syncService = SyncService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
+  List<Map<String, dynamic>> _escalas = [];
+  List<Map<String, dynamic>> _turnos = [];
 
   String? _nome;
   List<String> _setoresNomes = [];
@@ -31,12 +33,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _carregarDadosLocais() async {
     final nome = await _authService.getNome();
     final setores = await _dbHelper.getSetores();
+    final escalas = await _dbHelper.getEscalas();
+    final turnos = await _dbHelper.getTurnos();
     final ultimaSync = await _dbHelper.getUltimaSincronizacao();
 
     if (mounted) {
       setState(() {
         _nome = nome;
         _setoresNomes = setores.map((s) => s['nome'] as String).toList();
+        _escalas = escalas;
+        _turnos = turnos;
         _ultimaSincronizacao = ultimaSync;
       });
     }
@@ -67,6 +73,54 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
     }
+  }
+
+  String _formatarModelo(String modelo) {
+    switch (modelo) {
+      case 'JORNADA_24X72':
+        return '24x72';
+      case 'JORNADA_12X36':
+        return '12x36';
+      case 'TURNO_DIURNO':
+        return 'Turno diurno';
+      case 'COMERCIAL_5X2':
+        return 'Comercial 5x2';
+      default:
+        return modelo;
+    }
+  }
+
+  List<Widget> _buildEscalasWidgets() {
+    if (_escalas.isEmpty) {
+      return [
+        Text(
+          'Sem escala cadastrada',
+          style: TextStyle(color: Colors.grey.shade700),
+        ),
+      ];
+    }
+
+    return _escalas.map((escala) {
+      final turnosDaEscala =
+      _turnos.where((t) => t['escalaId'] == escala['id']).toList();
+      final turnosTexto = turnosDaEscala
+          .map((t) => '${t['horaInicio']}–${t['horaFim']}')
+          .join(', ');
+
+      final nome = (escala['nome'] as String?)?.isNotEmpty == true
+          ? escala['nome']
+          : 'Escala';
+      final modelo = _formatarModelo(escala['modelo'] as String? ?? '');
+
+      return Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Text(
+          '$nome ($modelo)${turnosTexto.isNotEmpty ? " — $turnosTexto" : ""}',
+          style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }).toList();
   }
 
   String _formatarDataHora(DateTime data) {
@@ -164,6 +218,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         'Sem setor alocado',
                         style: TextStyle(color: Colors.grey.shade700),
                       ),
+                    const SizedBox(height: 4),
+                    ..._buildEscalasWidgets(),
                     const SizedBox(height: 8),
                     const Text(
                       'Tela de ponto — em construção (APP 03)',
