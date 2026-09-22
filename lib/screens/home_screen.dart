@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
@@ -16,13 +17,31 @@ class _HomeScreenState extends State<HomeScreen> {
   final AuthService _authService = AuthService();
   final SyncService _syncService = SyncService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
+
+  // Sequência fixa de marcações do dia (card A03).
+  static const List<String> _sequenciaTipos = [
+    'ENTRADA',
+    'SAIDA_INTERVALO',
+    'RETORNO_INTERVALO',
+    'SAIDA',
+  ];
+
+  static const Map<String, String> _rotulos = {
+    'ENTRADA': 'Entrada',
+    'SAIDA_INTERVALO': 'Saída (intervalo)',
+    'RETORNO_INTERVALO': 'Retorno (intervalo)',
+    'SAIDA': 'Saída',
+  };
+
   List<Map<String, dynamic>> _escalas = [];
   List<Map<String, dynamic>> _turnos = [];
+  List<Map<String, dynamic>> _marcacoesHoje = [];
 
   String? _nome;
   List<String> _setoresNomes = [];
   DateTime? _ultimaSincronizacao;
   bool _sincronizando = false;
+  bool _batendoPonto = false;
 
   @override
   void initState() {
@@ -35,6 +54,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final setores = await _dbHelper.getSetores();
     final escalas = await _dbHelper.getEscalas();
     final turnos = await _dbHelper.getTurnos();
+    final marcacoesHoje = await _dbHelper.getMarcacoesHoje();
     final ultimaSync = await _dbHelper.getUltimaSincronizacao();
 
     if (mounted) {
@@ -43,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _setoresNomes = setores.map((s) => s['nome'] as String).toList();
         _escalas = escalas;
         _turnos = turnos;
+        _marcacoesHoje = marcacoesHoje;
         _ultimaSincronizacao = ultimaSync;
       });
     }
@@ -73,6 +94,129 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       }
     }
+  }
+
+  /// Gera um identificador único no aparelho — timestamp em
+  /// microssegundos + sufixo aleatório, sem depender de pacote extra.
+  String _gerarIdMarcacao() {
+    final aleatorio = Random();
+    final sufixo =
+    List.generate(8, (_) => aleatorio.nextInt(16).toRadixString(16)).join();
+    return '${DateTime.now().microsecondsSinceEpoch}-$sufixo';
+  }
+
+  String? get _proximoTipo {
+    if (_marcacoesHoje.length >= _sequenciaTipos.length) return null;
+    return _sequenciaTipos[_marcacoesHoje.length];
+  }
+
+  Future<void> _baterPonto() async {
+    final tipo = _proximoTipo;
+    if (tipo == null) return;
+
+    // Evita bater duas vezes seguidas por engano — exige confirmação.
+    final confirmou = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmar marcação'),
+        content: Text('Registrar "${_rotulos[tipo]}" agora?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Confirmar'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmou != true) return;
+
+    setState(() => _batendoPonto = true);
+
+    // Horário é o do momento do toque, não o de qualquer tentativa
+    // de envio futura (envio é escopo da APP 07).
+    final agora = DateTime.now();
+    final marcacao = {
+      'id': _gerarIdMarcacao(),
+      'tipo': tipo,
+      'dataHora': agora.toIso8601String(),
+    };
+
+    // Grava no banco local ANTES de qualquer outra coisa — não há
+    // tentativa de envio nesta tarefa, mas a ordem já fica certa
+    // para quando a fila de envio (APP 07) existir.
+    await _dbHelper.inserirMarcacao(marcacao);
+    await _carregarDadosLocais();
+
+    if (mounted) {
+      setState(() => _batendoPonto = false);
+      final horario =
+          '${agora.hour.toString().padLeft(2, '0')}:${agora.minute.toString().padLeft(2, '0')}';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_rotulos[tipo]} registrada às $horario.')),
+      );
+    }
+  }
+
+  String _formatarHorario(String dataHoraIso) {
+    final data = DateTime.tryParse(dataHoraIso);
+    if (data == null) return '--:--';
+    return '${data.hour.toString().padLeft(2, '0')}:${data.minute.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildSecaoPonto() {
+    final proximo = _proximoTipo;
+
+    return Column(
+      children: [
+        if (_marcacoesHoje.isEmpty)
+          Text(
+            'Nenhuma marcação hoje ainda',
+            style: TextStyle(color: Colors.grey.shade700),
+          )
+        else
+          ..._marcacoesHoje.map((m) {
+            final tipo = m['tipo'] as String;
+            final horario = _formatarHorario(m['dataHora'] as String);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                '${_rotulos[tipo] ?? tipo}: $horario',
+                style: const TextStyle(fontSize: 15),
+              ),
+            );
+          }),
+        const SizedBox(height: 16),
+        if (proximo != null)
+          ElevatedButton.icon(
+            onPressed: _batendoPonto ? null : _baterPonto,
+            icon: _batendoPonto
+                ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+                : const Icon(Icons.fingerprint),
+            label: Text(
+              _batendoPonto
+                  ? 'Registrando...'
+                  : 'Bater ${_rotulos[proximo]}',
+            ),
+          )
+        else
+          Text(
+            'Marcações do dia concluídas',
+            style: TextStyle(
+              color: Colors.green.shade700,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+      ],
+    );
   }
 
   String _formatarModelo(String modelo) {
@@ -133,8 +277,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _confirmarLogout() async {
     // 🔧 TAPA-BURACO PARA DEMONSTRAÇÃO — remover quando a fila real
-    // de marcações (APP 07 / sqflite) existir. Por enquanto simula
-    // que existem 2 marcações pendentes de envio.
+    // de envio de marcações (APP 07) existir. Por enquanto simula
+    // que existem 2 marcações pendentes de envio, sem olhar a
+    // tabela `marcacao` de verdade.
     const int marcacoesPendentesMock = 2;
 
     final temPendencias = marcacoesPendentesMock > 0;
@@ -163,9 +308,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     if (confirmou == true) {
-      // Apaga todos os dados locais (funcionário, setor, escala,
-      // marcações, política) junto com a sessão, conforme exigido
-      // pela APP 02.
+      // Apaga o cache local (funcionário, setor, escala, política).
+      // As marcações batidas (`marcacao`) NÃO são apagadas aqui —
+      // ver comentário em database_helper.dart.
       await _dbHelper.limparTudo();
       await _authService.logout();
 
@@ -195,61 +340,62 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const OfflineBanner(),
           Expanded(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      _nome != null ? 'Olá, $_nome!' : 'Olá!',
-                      style: const TextStyle(fontSize: 20),
-                    ),
-                    const SizedBox(height: 4),
-                    if (_setoresNomes.isNotEmpty)
+            child: SingleChildScrollView(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
                       Text(
-                        _setoresNomes.length == 1
-                            ? 'Setor: ${_setoresNomes.first}'
-                            : 'Setores: ${_setoresNomes.join(', ')}',
-                        style: TextStyle(color: Colors.grey.shade700),
-                      )
-                    else
+                        _nome != null ? 'Olá, $_nome!' : 'Olá!',
+                        style: const TextStyle(fontSize: 20),
+                      ),
+                      const SizedBox(height: 4),
+                      if (_setoresNomes.isNotEmpty)
+                        Text(
+                          _setoresNomes.length == 1
+                              ? 'Setor: ${_setoresNomes.first}'
+                              : 'Setores: ${_setoresNomes.join(', ')}',
+                          style: TextStyle(color: Colors.grey.shade700),
+                        )
+                      else
+                        Text(
+                          'Sem setor alocado',
+                          style: TextStyle(color: Colors.grey.shade700),
+                        ),
+                      const SizedBox(height: 4),
+                      ..._buildEscalasWidgets(),
+                      const SizedBox(height: 24),
+                      const Divider(),
+                      const SizedBox(height: 8),
+                      _buildSecaoPonto(),
+                      const SizedBox(height: 24),
                       Text(
-                        'Sem setor alocado',
-                        style: TextStyle(color: Colors.grey.shade700),
+                        _ultimaSincronizacao != null
+                            ? 'Última atualização: ${_formatarDataHora(_ultimaSincronizacao!)}'
+                            : 'Nunca sincronizado',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
                       ),
-                    const SizedBox(height: 4),
-                    ..._buildEscalasWidgets(),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Tela de ponto — em construção (APP 03)',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      _ultimaSincronizacao != null
-                          ? 'Última atualização: ${_formatarDataHora(_ultimaSincronizacao!)}'
-                          : 'Nunca sincronizado',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade600,
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _sincronizando ? null : _atualizarAgora,
+                        icon: _sincronizando
+                            ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                            : const Icon(Icons.refresh),
+                        label: Text(
+                          _sincronizando ? 'Atualizando...' : 'Atualizar agora',
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: _sincronizando ? null : _atualizarAgora,
-                      icon: _sincronizando
-                          ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                          : const Icon(Icons.refresh),
-                      label: Text(
-                        _sincronizando ? 'Atualizando...' : 'Atualizar agora',
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),

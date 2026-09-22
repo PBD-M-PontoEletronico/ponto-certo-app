@@ -17,7 +17,7 @@ class DatabaseHelper {
     final path = join(await getDatabasesPath(), 'ponto_certo.db');
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -51,9 +51,6 @@ class DatabaseHelper {
       )
     ''');
 
-    // Escala real: modelo + turnos (não é mais "5 dias com hora fixa").
-    // A projeção dia-a-dia completa depende de um endpoint futuro
-    // (/me/agenda), ainda não implementado no backend.
     await db.execute('''
       CREATE TABLE escala (
         id TEXT PRIMARY KEY,
@@ -79,6 +76,17 @@ class DatabaseHelper {
       )
     ''');
 
+    // Marcações batidas pelo funcionário neste aparelho (APP 03).
+    // NÃO é limpa no logout — é trabalho real ainda não enviado ao
+    // servidor (a fila de envio de verdade é escopo da APP 07).
+    await db.execute('''
+      CREATE TABLE marcacao (
+        id TEXT PRIMARY KEY,
+        tipo TEXT NOT NULL,
+        dataHora TEXT NOT NULL
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE metadata_sync (
         chave TEXT PRIMARY KEY,
@@ -88,13 +96,12 @@ class DatabaseHelper {
   }
 
   /// Banco local é só um cache reconstruído a cada sincronização —
-  /// não guarda nada que precise ser preservado entre versões. Por
-  /// isso toda migração aqui é só dropar as tabelas que mudaram e
-  /// recriar do zero.
+  /// não guarda nada que precise ser preservado entre versões (com
+  /// exceção da tabela `marcacao`, ver comentário acima). Por isso
+  /// toda migração aqui é só dropar as tabelas de cache que mudaram
+  /// e recriar do zero.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
-      // A tabela antiga 'escala_dia' (mock de 5 dias fixos) foi substituída
-      // por 'escala' + 'turno', que refletem o modelo real da API.
       await db.execute('DROP TABLE IF EXISTS escala_dia');
       await db.execute('''
         CREATE TABLE escala (
@@ -115,9 +122,6 @@ class DatabaseHelper {
     }
 
     if (oldVersion < 3) {
-      // politica_setor passou a guardar os campos reais da API em vez
-      // do mock (toleranciaMinutos saiu; entraram politicaForaPerimetro
-      // e ignorarLocalizacao).
       await db.execute('DROP TABLE IF EXISTS politica_setor');
       await db.execute('''
         CREATE TABLE politica_setor (
@@ -129,9 +133,24 @@ class DatabaseHelper {
         )
       ''');
     }
+
+    if (oldVersion < 4) {
+      // Tabela nova — não existia antes, então CREATE TABLE simples
+      // (sem DROP, pra não arriscar apagar algo que por acaso já
+      // exista com esse nome).
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS marcacao (
+          id TEXT PRIMARY KEY,
+          tipo TEXT NOT NULL,
+          dataHora TEXT NOT NULL
+        )
+      ''');
+    }
   }
 
-  /// Apaga TODOS os dados locais (usado no logout).
+  /// Apaga os dados de CACHE locais (usado no logout). A tabela
+  /// `marcacao` é preservada de propósito — são marcações reais
+  /// ainda não enviadas ao servidor.
   Future<void> limparTudo() async {
     final db = await database;
     await db.delete('funcionario');
@@ -173,8 +192,6 @@ class DatabaseHelper {
         await txn.insert('setor', setor);
       }
 
-
-
       if (politicaSetor != null) {
         await txn.insert('politica_setor', politicaSetor);
       }
@@ -203,6 +220,28 @@ class DatabaseHelper {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
     });
+  }
+
+  /// Grava uma marcação de ponto batida agora pelo funcionário.
+  /// Gravada direto — sem transação com outra coisa — porque é um
+  /// evento isolado, sem relação com a sincronização.
+  Future<void> inserirMarcacao(Map<String, dynamic> marcacao) async {
+    final db = await database;
+    await db.insert('marcacao', marcacao);
+  }
+
+  /// Marcações batidas hoje, em ordem cronológica.
+  Future<List<Map<String, dynamic>>> getMarcacoesHoje() async {
+    final db = await database;
+    final hoje = DateTime.now();
+    final prefixoHoje =
+        '${hoje.year.toString().padLeft(4, '0')}-${hoje.month.toString().padLeft(2, '0')}-${hoje.day.toString().padLeft(2, '0')}';
+    return await db.query(
+      'marcacao',
+      where: 'dataHora LIKE ?',
+      whereArgs: ['$prefixoHoje%'],
+      orderBy: 'dataHora ASC',
+    );
   }
 
   Future<DateTime?> getUltimaSincronizacao() async {
