@@ -8,6 +8,8 @@ class AuthService {
   static const _nomeKey = 'auth_nome';
   static const _perfilKey = 'auth_perfil';
   static const _empresaIdKey = 'auth_empresa_id';
+  static const _usuarioKey = 'auth_usuario';
+  static const _setoresIdsKey = 'auth_setores_ids';
 
 
   static const String _baseUrl = 'http://192.168.1.121:8080';
@@ -25,6 +27,8 @@ class AuthService {
         await _storage.write(key: _tokenKey, value: 'token-fake-123');
         await _storage.write(key: _nomeKey, value: 'Usuário Teste');
         await _storage.write(key: _perfilKey, value: 'SUPERADMIN');
+        await _storage.write(key: _usuarioKey, value: usuario);
+        await _storage.write(key: _setoresIdsKey, value: '');
         return true;
       }
       return false;
@@ -44,12 +48,23 @@ class AuthService {
           await _storage.write(key: _tokenKey, value: token);
           await _storage.write(key: _nomeKey, value: data['nome'] ?? '');
           await _storage.write(key: _perfilKey, value: data['perfil'] ?? '');
+          await _storage.write(key: _usuarioKey, value: usuario);
           if (data['empresaId'] != null) {
             await _storage.write(
               key: _empresaIdKey,
               value: data['empresaId'].toString(),
             );
           }
+          // API ainda retorna setoresIds como lista (após ajuste combinado).
+          // Se ainda não existir, salva vazio sem quebrar o login.
+          final setoresIds = (data['setoresIds'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+              <String>[];
+          await _storage.write(
+            key: _setoresIdsKey,
+            value: setoresIds.join(','),
+          );
           return true;
         }
       }
@@ -81,17 +96,38 @@ class AuthService {
     return await _storage.read(key: _perfilKey);
   }
 
+  /// Retorna o nome de usuário (login) salvo.
+  Future<String?> getUsuario() async {
+    return await _storage.read(key: _usuarioKey);
+  }
+
+  /// Retorna a lista de IDs de setores do funcionário logado.
+  /// Vazia se o backend ainda não enviar essa informação, ou se
+  /// o usuário não tiver setor (ex: SUPERADMIN).
+  Future<List<String>> getSetoresIds() async {
+    final raw = await _storage.read(key: _setoresIdsKey);
+    if (raw == null || raw.isEmpty) return [];
+    return raw.split(',');
+  }
+
   /// Remove todos os dados de sessão salvos (logout).
   Future<void> logout() async {
     await _storage.delete(key: _tokenKey);
     await _storage.delete(key: _nomeKey);
     await _storage.delete(key: _perfilKey);
     await _storage.delete(key: _empresaIdKey);
+    await _storage.delete(key: _usuarioKey);
+    await _storage.delete(key: _setoresIdsKey);
   }
 
   /// Chamado quando a API responde que o token expirou (401/403).
   /// Remove só o token, mantendo dados locais (fila de marcações etc).
   Future<void> clearExpiredToken() async {
     await _storage.delete(key: _tokenKey);
+  }
+
+  /// Retorna o empresaId salvo (null para SUPERADMIN, que não tem empresa).
+  Future<String?> getEmpresaId() async {
+    return await _storage.read(key: _empresaIdKey);
   }
 }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -14,6 +15,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usuarioController = TextEditingController();
   final _senhaController = TextEditingController();
   final AuthService _authService = AuthService();
+  final SyncService _syncService = SyncService();
 
   bool _carregando = false;
   String? _erro;
@@ -44,6 +46,13 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _carregando = false);
 
     if (sucesso) {
+      // Primeira sincronização, logo após o login. Se falhar (raro,
+      // já que acabou de confirmar conexão pra logar), a Home ainda
+      // funciona, só que sem dados locais até a próxima tentativa.
+      await _syncService.sincronizar();
+
+      if (!mounted) return;
+
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => const HomeScreen()),
             (route) => false,
