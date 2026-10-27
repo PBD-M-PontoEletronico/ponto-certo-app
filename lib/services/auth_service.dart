@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../utils/uuid.dart';
 
 class AuthService {
   static const _storage = FlutterSecureStorage();
@@ -10,9 +11,9 @@ class AuthService {
   static const _empresaIdKey = 'auth_empresa_id';
   static const _usuarioKey = 'auth_usuario';
   static const _setoresIdsKey = 'auth_setores_ids';
+  static const _dispositivoKey = 'auth_dispositivo_id';
 
-
-  static const String _baseUrl = 'http://192.168.1.121:8080';
+  static const String _baseUrl = 'http://192.168.1.108:8080';
 
   //  Enquanto a API não estiver rodando, deixar true pra testar o fluxo.
   // Quando a API  estiver funcionando , mudar para false.
@@ -38,10 +39,15 @@ class AuthService {
       final response = await http.post(
         Uri.parse('$_baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'usuario': usuario, 'senha': senha}),
+        body: jsonEncode({
+          'usuario': usuario,
+          'senha': senha,
+          'identificadorDispositivo': await getIdentificadorDispositivo(),
+        }),
       );
 
       if (response.statusCode == 200) {
+        print('=== LOGIN respondeu ${response.statusCode} ===');
         final data = jsonDecode(response.body);
         final token = data['token'] as String?;
         if (token != null) {
@@ -69,10 +75,24 @@ class AuthService {
         }
       }
       return false;
-    } catch (e) {
-      // Falha de rede, timeout, API fora do ar etc. — erro genérico
+    } catch (e, stack) {
+      print('=== ERRO NO LOGIN ===');
+      print(e);
+      print(stack);
       return false;
     }
+  }
+
+  /// Identificador estável deste aparelho (WEB-07). Gerado uma vez e
+  /// guardado. NÃO é apagado no logout, senão todo login viraria
+  /// "aparelho novo" e desativaria o anterior.
+  Future<String> getIdentificadorDispositivo() async {
+    var id = await _storage.read(key: _dispositivoKey);
+    if (id == null || id.isEmpty) {
+      id = gerarUuidV4();
+      await _storage.write(key: _dispositivoKey, value: id);
+    }
+    return id;
   }
 
   /// Verifica se já existe um token salvo (sessão ativa offline).
@@ -111,6 +131,7 @@ class AuthService {
   }
 
   /// Remove todos os dados de sessão salvos (logout).
+  /// O identificador do aparelho é mantido de propósito.
   Future<void> logout() async {
     await _storage.delete(key: _tokenKey);
     await _storage.delete(key: _nomeKey);

@@ -1,20 +1,22 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 import 'conectivity_service.dart' show ConnectivityService;
 import 'database_helper.dart';
 
-/// Orquestra a sincronização de dados locais (APP 02).
+/// Orquestra a sincronização de dados locais (APP 02) e mede o desvio
+/// do relógio do aparelho em relação ao servidor (APP 04).
 /// Busca dados reais da API quando existem, e usa valores simbólicos
-/// (mock) só para o que ainda não foi implementado no backend
-/// (marcações recentes).
+/// (mock) só para o que ainda não foi migrado (marcações recentes).
 class SyncService {
   final AuthService _authService = AuthService();
   final ConnectivityService _connectivityService = ConnectivityService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
-  static const String _baseUrl = 'http://192.168.1.121:8080';
+  static const String _baseUrl = 'http://192.168.1.108:8080';
+
+  static const Duration _timeout = Duration(seconds: 10);
 
   Future<bool> sincronizar() async {
     final online = await _connectivityService.isOnline();
@@ -43,10 +45,9 @@ class SyncService {
       String matricula = ''; // ⚠️ buscado mas não persistido ainda
       String cargo = '';     // ⚠️ buscado mas não persistido ainda
 
-      final responseAlocacoes = await http.get(
-        Uri.parse('$_baseUrl/me/alocacoes'),
-        headers: headers,
-      );
+      final responseAlocacoes = await http
+          .get(Uri.parse('$_baseUrl/me/alocacoes'), headers: headers)
+          .timeout(_timeout);
 
       if (responseAlocacoes.statusCode == 200) {
         final lista = jsonDecode(responseAlocacoes.body) as List;
@@ -80,8 +81,7 @@ class SyncService {
           // Política real: usa a do primeiro setor ativo encontrado.
           // Funcionário alocado em mais de um setor só guarda uma
           // política local por enquanto — revisar se isso virar
-          // problema prático (ex: bater ponto em setor diferente
-          // do "principal").
+          // problema prático.
           politicaMap ??= {
             'setorId': setor['id'] as String,
             'raioMetros': setor['raioMetros'] as int,
@@ -129,7 +129,8 @@ class SyncService {
         'setoresIds': setoresIds.join(','),
       };
 
-      // --- 2. Marcações recentes: SIMBÓLICO (endpoint não existe) ---
+      // --- 2. Marcações recentes: SIMBÓLICO (a API já entrega em
+      // /me/abertura, migração fica para tarefa própria) ---
       final marcacoesMock = [
         {
           'dataHora': DateTime.now()
@@ -139,12 +140,36 @@ class SyncService {
         },
       ];
 
-      // --- 3. Hora do servidor: pega do header HTTP de uma chamada
-      // incidental ao /auth/login (gambiarra — ideal seria um GET /hora) ---
-      final horaServidorResponse = await http.get(Uri.parse('$_baseUrl/auth/login'));
-      final headerData = horaServidorResponse.headers['date'];
-      final horaServidor =
-      headerData != null ? _parseHttpDate(headerData) : DateTime.now().toIso8601String();
+      // --- 3. Hora do servidor e desvio do relógio (APP 04) ---
+      // O desvio é medido no meio da viagem (ida + volta), pra latência
+      // da rede não entortar o número.
+      final idDispositivo = await _authService.getIdentificadorDispositivo();
+      final t0 = DateTime.now().millisecondsSinceEpoch;
+      final respAbertura = await http
+          .get(
+        Uri.parse('$_baseUrl/me/abertura').replace(
+          queryParameters: {'identificadorDispositivo': idDispositivo},
+        ),
+        headers: headers,
+      )
+          .timeout(_timeout);
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+
+      String horaServidor = DateTime.now().toIso8601String();
+      if (respAbertura.statusCode == 200) {
+        final abertura =
+        jsonDecode(respAbertura.body) as Map<String, dynamic>;
+        final servidorMs = (abertura['horaServidorEpochMs'] as num).toInt();
+        final aparelhoMs = (t0 + t1) ~/ 2;
+        await _dbHelper.salvarDesvioRelogio(aparelhoMs - servidorMs);
+        horaServidor = DateTime.fromMillisecondsSinceEpoch(servidorMs,
+            isUtc: true)
+            .toIso8601String();
+      } else {
+        // 400 = faltou identificadorDispositivo; 403 = este aparelho não é
+        // mais o ativo da conta (logou em outro). Vale logar de novo.
+        print('=== /me/abertura respondeu ${respAbertura.statusCode} ===');
+      }
 
       // --- Grava tudo em uma única transação (tudo ou nada) ---
       await _dbHelper.salvarSincronizacaoCompleta(
@@ -158,19 +183,18 @@ class SyncService {
       );
 
       return true;
+    } on TimeoutException catch (e, stack) {
+      print('=== TIMEOUT NA SINCRONIZAÇÃO ===');
+      print('A API não respondeu em ${_timeout.inSeconds}s. Verifique se '
+          'o servidor está rodando e se o celular está na mesma rede do PC.');
+      print(e);
+      print(stack);
+      return false;
     } catch (e, stack) {
       print('=== ERRO NA SINCRONIZAÇÃO ===');
       print(e);
       print(stack);
       return false;
-    }
-  }
-
-  String _parseHttpDate(String httpDate) {
-    try {
-      return HttpDate.parse(httpDate).toIso8601String();
-    } catch (_) {
-      return DateTime.now().toIso8601String();
     }
   }
 }
