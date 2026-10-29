@@ -17,7 +17,7 @@ class DatabaseHelper {
     final path = join(await getDatabasesPath(), 'ponto_certo.db');
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -76,14 +76,18 @@ class DatabaseHelper {
       )
     ''');
 
-    // Marcações batidas pelo funcionário neste aparelho (APP 03).
+    // Marcações batidas pelo funcionário neste aparelho (APP 03/04).
     // NÃO é limpa no logout — é trabalho real ainda não enviado ao
     // servidor (a fila de envio de verdade é escopo da APP 07).
+    // horaAparelhoEpochMs e desvioRelogioMs viajam junto com a marcação
+    // quando o envio existir (WEB-09).
     await db.execute('''
       CREATE TABLE marcacao (
         id TEXT PRIMARY KEY,
         tipo TEXT NOT NULL,
-        dataHora TEXT NOT NULL
+        dataHora TEXT NOT NULL,
+        horaAparelhoEpochMs INTEGER,
+        desvioRelogioMs INTEGER
       )
     ''');
 
@@ -97,9 +101,7 @@ class DatabaseHelper {
 
   /// Banco local é só um cache reconstruído a cada sincronização —
   /// não guarda nada que precise ser preservado entre versões (com
-  /// exceção da tabela `marcacao`, ver comentário acima). Por isso
-  /// toda migração aqui é só dropar as tabelas de cache que mudaram
-  /// e recriar do zero.
+  /// exceção da tabela `marcacao`, que só recebe ALTER, nunca DROP).
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute('DROP TABLE IF EXISTS escala_dia');
@@ -135,9 +137,6 @@ class DatabaseHelper {
     }
 
     if (oldVersion < 4) {
-      // Tabela nova — não existia antes, então CREATE TABLE simples
-      // (sem DROP, pra não arriscar apagar algo que por acaso já
-      // exista com esse nome).
       await db.execute('''
         CREATE TABLE IF NOT EXISTS marcacao (
           id TEXT PRIMARY KEY,
@@ -145,6 +144,14 @@ class DatabaseHelper {
           dataHora TEXT NOT NULL
         )
       ''');
+    }
+
+    if (oldVersion < 5) {
+      // marcacao guarda trabalho real do funcionário: ALTER, nunca DROP.
+      await db.execute(
+          'ALTER TABLE marcacao ADD COLUMN horaAparelhoEpochMs INTEGER');
+      await db.execute(
+          'ALTER TABLE marcacao ADD COLUMN desvioRelogioMs INTEGER');
     }
   }
 
@@ -223,8 +230,6 @@ class DatabaseHelper {
   }
 
   /// Grava uma marcação de ponto batida agora pelo funcionário.
-  /// Gravada direto — sem transação com outra coisa — porque é um
-  /// evento isolado, sem relação com a sincronização.
   Future<void> inserirMarcacao(Map<String, dynamic> marcacao) async {
     final db = await database;
     await db.insert('marcacao', marcacao);
@@ -242,6 +247,30 @@ class DatabaseHelper {
       whereArgs: ['$prefixoHoje%'],
       orderBy: 'dataHora ASC',
     );
+  }
+
+  /// Guarda o último desvio medido (aparelho - servidor, em ms).
+  /// Fica em metadata_sync, que é limpa no logout: o desvio é
+  /// remedido a cada login.
+  Future<void> salvarDesvioRelogio(int desvioMs) async {
+    final db = await database;
+    await db.insert(
+      'metadata_sync',
+      {'chave': 'desvio_relogio_ms', 'valor': desvioMs.toString()},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// null = nunca conversou com o servidor (desvio desconhecido).
+  Future<int?> getDesvioRelogioMs() async {
+    final db = await database;
+    final r = await db.query(
+      'metadata_sync',
+      where: 'chave = ?',
+      whereArgs: ['desvio_relogio_ms'],
+    );
+    if (r.isEmpty) return null;
+    return int.tryParse(r.first['valor'] as String);
   }
 
   Future<DateTime?> getUltimaSincronizacao() async {

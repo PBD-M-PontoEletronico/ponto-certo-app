@@ -1,8 +1,8 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 import '../services/database_helper.dart';
+import '../utils/uuid.dart';
 import 'login_screen.dart';
 import '../widgets/offline_banner.dart';
 
@@ -14,10 +14,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final AuthService _authService = AuthService();
-  final SyncService _syncService = SyncService();
-  final DatabaseHelper _dbHelper = DatabaseHelper();
-
   // Sequência fixa de marcações do dia (card A03).
   static const List<String> _sequenciaTipos = [
     'ENTRADA',
@@ -33,6 +29,9 @@ class _HomeScreenState extends State<HomeScreen> {
     'SAIDA': 'Saída',
   };
 
+  final AuthService _authService = AuthService();
+  final SyncService _syncService = SyncService();
+  final DatabaseHelper _dbHelper = DatabaseHelper();
   List<Map<String, dynamic>> _escalas = [];
   List<Map<String, dynamic>> _turnos = [];
   List<Map<String, dynamic>> _marcacoesHoje = [];
@@ -42,6 +41,11 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _ultimaSincronizacao;
   bool _sincronizando = false;
   bool _batendoPonto = false;
+
+  // Desvio do relógio (APP 04). null = nunca conferiu com o servidor.
+  int? _desvioMs;
+  // Acima disso o app avisa. O card não define o número: combinar com o grupo.
+  static const int _limiteDesvioMs = 5 * 60 * 1000; // 5 min
 
   @override
   void initState() {
@@ -56,6 +60,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final turnos = await _dbHelper.getTurnos();
     final marcacoesHoje = await _dbHelper.getMarcacoesHoje();
     final ultimaSync = await _dbHelper.getUltimaSincronizacao();
+    final desvio = await _dbHelper.getDesvioRelogioMs();
 
     if (mounted) {
       setState(() {
@@ -65,6 +70,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _turnos = turnos;
         _marcacoesHoje = marcacoesHoje;
         _ultimaSincronizacao = ultimaSync;
+        _desvioMs = desvio;
       });
     }
   }
@@ -96,15 +102,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Gera um identificador único no aparelho — timestamp em
-  /// microssegundos + sufixo aleatório, sem depender de pacote extra.
-  String _gerarIdMarcacao() {
-    final aleatorio = Random();
-    final sufixo =
-    List.generate(8, (_) => aleatorio.nextInt(16).toRadixString(16)).join();
-    return '${DateTime.now().microsecondsSinceEpoch}-$sufixo';
-  }
-
   String? get _proximoTipo {
     if (_marcacoesHoje.length >= _sequenciaTipos.length) return null;
     return _sequenciaTipos[_marcacoesHoje.length];
@@ -114,12 +111,32 @@ class _HomeScreenState extends State<HomeScreen> {
     final tipo = _proximoTipo;
     if (tipo == null) return;
 
+    // Instante do toque: é ESTE horário que é mostrado e gravado.
+    final agora = DateTime.now();
+    final desvio = _desvioMs;
+    final aviso = _textoAvisoRelogio(desvio);
+
     // Evita bater duas vezes seguidas por engano — exige confirmação.
     final confirmou = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirmar marcação'),
-        content: Text('Registrar "${_rotulos[tipo]}" agora?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Registrar "${_rotulos[tipo]}"?'),
+            const SizedBox(height: 8),
+            Text(
+              'Hora que será registrada: ${_formatarHorarioCompleto(agora)}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            if (aviso != null) ...[
+              const SizedBox(height: 8),
+              Text(aviso, style: const TextStyle(fontSize: 12)),
+            ],
+          ],
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -137,18 +154,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => _batendoPonto = true);
 
-    // Horário é o do momento do toque, não o de qualquer tentativa
-    // de envio futura (envio é escopo da APP 07).
-    final agora = DateTime.now();
+    // Grava no banco local ANTES de qualquer outra coisa. O envio ao
+    // servidor é escopo da APP 07.
     final marcacao = {
-      'id': _gerarIdMarcacao(),
+      'id': gerarUuidV4(),
       'tipo': tipo,
       'dataHora': agora.toIso8601String(),
+      'horaAparelhoEpochMs': agora.millisecondsSinceEpoch,
+      'desvioRelogioMs': desvio,
     };
 
-    // Grava no banco local ANTES de qualquer outra coisa — não há
-    // tentativa de envio nesta tarefa, mas a ordem já fica certa
-    // para quando a fila de envio (APP 07) existir.
     await _dbHelper.inserirMarcacao(marcacao);
     await _carregarDadosLocais();
 
@@ -162,6 +177,46 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  String _formatarHorarioCompleto(DateTime d) =>
+      '${d.hour.toString().padLeft(2, '0')}:'
+          '${d.minute.toString().padLeft(2, '0')}:'
+          '${d.second.toString().padLeft(2, '0')}';
+
+  /// null = relógio em hora, nada a avisar.
+  String? _textoAvisoRelogio(int? desvio) {
+    if (desvio == null) {
+      return 'Desvio do relógio desconhecido: o app ainda não conferiu a '
+          'hora com o servidor. A marcação será registrada e pode ir para análise.';
+    }
+    if (desvio.abs() > _limiteDesvioMs) {
+      final min = (desvio.abs() / 60000).round();
+      final sentido = desvio > 0 ? 'adiantado' : 'atrasado';
+      return 'O relógio do aparelho está ~$min min $sentido em relação ao '
+          'servidor. A marcação será registrada e vai para análise.';
+    }
+    return null;
+  }
+
+  Widget _buildAvisoRelogio() {
+    final aviso = _textoAvisoRelogio(_desvioMs);
+    if (aviso == null) {
+      return Text(
+        'Relógio do aparelho conferido com o servidor ✓',
+        style: TextStyle(fontSize: 12, color: Colors.green.shade700),
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.all(8),
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        border: Border.all(color: Colors.orange.shade300),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(aviso, style: const TextStyle(fontSize: 12)),
+    );
+  }
+
   String _formatarHorario(String dataHoraIso) {
     final data = DateTime.tryParse(dataHoraIso);
     if (data == null) return '--:--';
@@ -173,6 +228,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Column(
       children: [
+        _buildAvisoRelogio(),
         if (_marcacoesHoje.isEmpty)
           Text(
             'Nenhuma marcação hoje ainda',
