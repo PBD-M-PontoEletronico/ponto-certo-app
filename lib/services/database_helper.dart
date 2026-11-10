@@ -17,7 +17,7 @@ class DatabaseHelper {
     final path = join(await getDatabasesPath(), 'ponto_certo.db');
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -37,7 +37,9 @@ class DatabaseHelper {
     await db.execute('''
       CREATE TABLE setor (
         id TEXT PRIMARY KEY,
-        nome TEXT NOT NULL
+        nome TEXT NOT NULL,
+        latitude REAL,
+        longitude REAL
       )
     ''');
 
@@ -76,18 +78,20 @@ class DatabaseHelper {
       )
     ''');
 
-    // Marcações batidas pelo funcionário neste aparelho (APP 03/04).
+    // Marcações batidas pelo funcionário neste aparelho (APP 03/04/05).
     // NÃO é limpa no logout — é trabalho real ainda não enviado ao
     // servidor (a fila de envio de verdade é escopo da APP 07).
-    // horaAparelhoEpochMs e desvioRelogioMs viajam junto com a marcação
-    // quando o envio existir (WEB-09).
+    // horaAparelhoEpochMs, desvioRelogioMs, latitude e longitude viajam
+    // junto com a marcação quando o envio existir (WEB-09).
     await db.execute('''
       CREATE TABLE marcacao (
         id TEXT PRIMARY KEY,
         tipo TEXT NOT NULL,
         dataHora TEXT NOT NULL,
         horaAparelhoEpochMs INTEGER,
-        desvioRelogioMs INTEGER
+        desvioRelogioMs INTEGER,
+        latitude REAL,
+        longitude REAL
       )
     ''');
 
@@ -152,6 +156,15 @@ class DatabaseHelper {
           'ALTER TABLE marcacao ADD COLUMN horaAparelhoEpochMs INTEGER');
       await db.execute(
           'ALTER TABLE marcacao ADD COLUMN desvioRelogioMs INTEGER');
+    }
+
+    if (oldVersion < 6) {
+      // setor é cache: só ganha as colunas (preenchidas na próxima
+      // sincronização). marcacao é trabalho real: ALTER, nunca DROP.
+      await db.execute('ALTER TABLE setor ADD COLUMN latitude REAL');
+      await db.execute('ALTER TABLE setor ADD COLUMN longitude REAL');
+      await db.execute('ALTER TABLE marcacao ADD COLUMN latitude REAL');
+      await db.execute('ALTER TABLE marcacao ADD COLUMN longitude REAL');
     }
   }
 

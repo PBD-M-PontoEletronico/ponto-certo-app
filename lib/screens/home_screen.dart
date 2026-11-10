@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 import '../services/database_helper.dart';
+import '../services/localizacao_service.dart';
 import '../utils/uuid.dart';
 import 'login_screen.dart';
 import '../widgets/offline_banner.dart';
@@ -32,6 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final AuthService _authService = AuthService();
   final SyncService _syncService = SyncService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
+  final LocalizacaoService _localizacaoService = LocalizacaoService();
   List<Map<String, dynamic>> _escalas = [];
   List<Map<String, dynamic>> _turnos = [];
   List<Map<String, dynamic>> _marcacoesHoje = [];
@@ -107,6 +109,10 @@ class _HomeScreenState extends State<HomeScreen> {
     return _sequenciaTipos[_marcacoesHoje.length];
   }
 
+  String _formatarDistancia(double metros) => metros >= 1000
+      ? '${(metros / 1000).toStringAsFixed(1)} km'
+      : '${metros.round()} m';
+
   Future<void> _baterPonto() async {
     final tipo = _proximoTipo;
     if (tipo == null) return;
@@ -114,7 +120,80 @@ class _HomeScreenState extends State<HomeScreen> {
     // Instante do toque: é ESTE horário que é mostrado e gravado.
     final agora = DateTime.now();
     final desvio = _desvioMs;
-    final aviso = _textoAvisoRelogio(desvio);
+    final avisoRelogio = _textoAvisoRelogio(desvio);
+
+    // --- Perímetro (APP 05). A política veio do servidor; o app só
+    // aplica. Quem decide de verdade é o servidor, que recalcula. ---
+    final politica = await _dbHelper.getPoliticaSetor();
+    final setores = await _dbHelper.getSetores();
+    Map<String, dynamic>? setor;
+    if (politica != null) {
+      for (final s in setores) {
+        if (s['id'] == politica['setorId']) setor = s;
+      }
+    }
+    final ignorarLocalizacao =
+        politica != null && politica['ignorarLocalizacao'] == 1;
+    final setorLat = (setor?['latitude'] as num?)?.toDouble();
+    final setorLng = (setor?['longitude'] as num?)?.toDouble();
+    final precisaGps = politica != null &&
+        !ignorarLocalizacao &&
+        setorLat != null &&
+        setorLng != null;
+    final raio = politica != null ? politica['raioMetros'] as int : 0;
+    final bloqueiaFora =
+        politica != null && politica['politicaForaPerimetro'] == 'BLOQUEAR';
+
+    double? lat;
+    double? lng;
+    double? distanciaCalc;
+    String? problemaCalc;
+    var acaoCalc = AcaoConfiguracao.nenhuma;
+
+    if (precisaGps) {
+      setState(() => _batendoPonto = true);
+      final r = await _localizacaoService.capturar();
+      if (!mounted) return;
+      setState(() => _batendoPonto = false);
+      lat = r.latitude;
+      lng = r.longitude;
+      problemaCalc = r.problema;
+      acaoCalc = r.acao;
+      if (lat != null && lng != null) {
+        distanciaCalc = LocalizacaoService.distanciaMetros(
+            setorLat, setorLng, lat, lng);
+      }
+    }
+
+    // Cópias final: seguras para usar dentro dos diálogos.
+    final double? distancia = distanciaCalc;
+    final String? problemaGps = problemaCalc;
+    final AcaoConfiguracao acaoConfig = acaoCalc;
+    final bool foraDoPerimetro = distancia != null && distancia > raio;
+
+    if (foraDoPerimetro && bloqueiaFora) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Fora do perímetro'),
+          content: Text(
+            'Você está a ${_formatarDistancia(distancia)} do setor '
+                '(limite: $raio m). Este setor não aceita marcação fora do '
+                'perímetro. Vá até o local e tente de novo.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Entendi'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    if (!mounted) return;
 
     // Evita bater duas vezes seguidas por engano — exige confirmação.
     final confirmou = await showDialog<bool>(
@@ -131,9 +210,34 @@ class _HomeScreenState extends State<HomeScreen> {
               'Hora que será registrada: ${_formatarHorarioCompleto(agora)}',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            if (aviso != null) ...[
+            if (distancia != null) ...[
               const SizedBox(height: 8),
-              Text(aviso, style: const TextStyle(fontSize: 12)),
+              Text('Distância até o setor: ${_formatarDistancia(distancia)} '
+                  '(limite: $raio m)'),
+              Text(
+                foraDoPerimetro
+                    ? 'Fora do perímetro: a marcação será registrada e '
+                    'ficará pendente de análise.'
+                    : 'Dentro do perímetro ✓',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: foraDoPerimetro
+                      ? Colors.orange.shade800
+                      : Colors.green.shade700,
+                ),
+              ),
+            ],
+            if (problemaGps != null) ...[
+              const SizedBox(height: 8),
+              Text(problemaGps, style: const TextStyle(fontSize: 12)),
+              const Text(
+                'A marcação será registrada sem posição e pode ir para análise.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
+            if (avisoRelogio != null) ...[
+              const SizedBox(height: 8),
+              Text(avisoRelogio, style: const TextStyle(fontSize: 12)),
             ],
           ],
         ),
@@ -142,6 +246,12 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('Cancelar'),
           ),
+          if (acaoConfig != AcaoConfiguracao.nenhuma)
+            TextButton(
+              onPressed: () =>
+                  _localizacaoService.abrirConfiguracoes(acaoConfig),
+              child: const Text('Configurações'),
+            ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('Confirmar'),
@@ -155,13 +265,15 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _batendoPonto = true);
 
     // Grava no banco local ANTES de qualquer outra coisa. O envio ao
-    // servidor é escopo da APP 07.
+    // servidor (com latitude/longitude) é escopo da APP 07.
     final marcacao = {
       'id': gerarUuidV4(),
       'tipo': tipo,
       'dataHora': agora.toIso8601String(),
       'horaAparelhoEpochMs': agora.millisecondsSinceEpoch,
       'desvioRelogioMs': desvio,
+      'latitude': lat,
+      'longitude': lng,
     };
 
     await _dbHelper.inserirMarcacao(marcacao);
@@ -443,7 +555,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             ? const SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          child:
+                          CircularProgressIndicator(strokeWidth: 2),
                         )
                             : const Icon(Icons.refresh),
                         label: Text(
