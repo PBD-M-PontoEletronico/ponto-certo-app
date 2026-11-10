@@ -5,8 +5,9 @@ import 'auth_service.dart';
 import 'conectivity_service.dart' show ConnectivityService;
 import 'database_helper.dart';
 
-/// Orquestra a sincronização de dados locais (APP 02) e mede o desvio
-/// do relógio do aparelho em relação ao servidor (APP 04).
+/// Orquestra a sincronização de dados locais (APP 02), mede o desvio
+/// do relógio do aparelho em relação ao servidor (APP 04) e guarda a
+/// coordenada do setor para o perímetro (APP 05).
 /// Busca dados reais da API quando existem, e usa valores simbólicos
 /// (mock) só para o que ainda não foi migrado (marcações recentes).
 class SyncService {
@@ -14,8 +15,7 @@ class SyncService {
   final ConnectivityService _connectivityService = ConnectivityService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
-  static const String _baseUrl = 'http://192.168.1.108:8080';
-
+  static const String _baseUrl = 'http://192.168.1.131:8080';
   static const Duration _timeout = Duration(seconds: 10);
 
   Future<bool> sincronizar() async {
@@ -76,7 +76,12 @@ class SyncService {
           if (!ativa) continue;
 
           final setor = item['setor'] as Map<String, dynamic>;
-          setoresMaps.add({'id': setor['id'], 'nome': setor['nome']});
+          setoresMaps.add({
+            'id': setor['id'],
+            'nome': setor['nome'],
+            'latitude': (setor['latitude'] as num?)?.toDouble(),
+            'longitude': (setor['longitude'] as num?)?.toDouble(),
+          });
 
           // Política real: usa a do primeiro setor ativo encontrado.
           // Funcionário alocado em mais de um setor só guarda uma
