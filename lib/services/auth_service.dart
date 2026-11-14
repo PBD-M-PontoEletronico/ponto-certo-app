@@ -13,7 +13,9 @@ class AuthService {
   static const _setoresIdsKey = 'auth_setores_ids';
   static const _dispositivoKey = 'auth_dispositivo_id';
 
-  static const String _baseUrl = 'http://192.168.1.108:8080';
+  // mistatic const String _baseUrl = 'http://192.168.0.4:8080';
+
+   static const String _baseUrl = 'http://192.168.1.108:8080';
 
   //  Enquanto a API não estiver rodando, deixar true pra testar o fluxo.
   // Quando a API  estiver funcionando , mudar para false.

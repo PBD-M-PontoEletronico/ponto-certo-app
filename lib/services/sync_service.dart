@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 import 'conectivity_service.dart' show ConnectivityService;
 import 'database_helper.dart';
+import 'marcacao_service.dart';
 
 /// Orquestra a sincronização de dados locais (APP 02), mede o desvio
 /// do relógio do aparelho em relação ao servidor (APP 04) e guarda a
@@ -15,6 +16,7 @@ class SyncService {
   final ConnectivityService _connectivityService = ConnectivityService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
+  // mi static const String _baseUrl = 'http://192.168.0.4:8080';
   static const String _baseUrl = 'http://192.168.1.131:8080';
   static const Duration _timeout = Duration(seconds: 10);
 
@@ -186,6 +188,8 @@ class SyncService {
         marcacoesRecentes: marcacoesMock,
         horaServidor: horaServidor,
       );
+
+      await MarcacaoService().enviarPendentes();
 
       return true;
     } on TimeoutException catch (e, stack) {

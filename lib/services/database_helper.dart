@@ -101,6 +101,24 @@ class DatabaseHelper {
         valor TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE marcacao (
+        id TEXT PRIMARY KEY,
+        tipo TEXT NOT NULL,
+        dataHora TEXT NOT NULL,
+        horaAparelhoEpochMs INTEGER,
+        desvioRelogioMs INTEGER,
+        latitude REAL,
+        longitude REAL,
+        setorId TEXT,
+        metodoConfirmacao TEXT,
+        digitalConfirmada INTEGER,
+        selfiePath TEXT,
+        selfieEnviada INTEGER NOT NULL DEFAULT 0,
+        enviada INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
   }
 
   /// Banco local é só um cache reconstruído a cada sincronização —
@@ -165,6 +183,17 @@ class DatabaseHelper {
       await db.execute('ALTER TABLE setor ADD COLUMN longitude REAL');
       await db.execute('ALTER TABLE marcacao ADD COLUMN latitude REAL');
       await db.execute('ALTER TABLE marcacao ADD COLUMN longitude REAL');
+    }
+
+    if (oldVersion < 7) {
+      await db.execute('ALTER TABLE marcacao ADD COLUMN setorId TEXT');
+      await db.execute('ALTER TABLE marcacao ADD COLUMN metodoConfirmacao TEXT');
+      await db.execute('ALTER TABLE marcacao ADD COLUMN digitalConfirmada INTEGER');
+      await db.execute('ALTER TABLE marcacao ADD COLUMN selfiePath TEXT');
+      await db.execute(
+          'ALTER TABLE marcacao ADD COLUMN selfieEnviada INTEGER NOT NULL DEFAULT 0');
+      await db.execute(
+          'ALTER TABLE marcacao ADD COLUMN enviada INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -246,6 +275,22 @@ class DatabaseHelper {
   Future<void> inserirMarcacao(Map<String, dynamic> marcacao) async {
     final db = await database;
     await db.insert('marcacao', marcacao);
+  }
+
+  /// Marcações ainda não enviadas ao servidor (fila mínima da APP 07).
+  Future<List<Map<String, dynamic>>> getMarcacoesNaoEnviadas() async {
+    final db = await database;
+    return await db.query('marcacao', where: 'enviada = 0', orderBy: 'dataHora ASC');
+  }
+
+  Future<void> marcarComoEnviada(String id) async {
+    final db = await database;
+    await db.update('marcacao', {'enviada': 1}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<void> marcarSelfieComoEnviada(String id) async {
+    final db = await database;
+    await db.update('marcacao', {'selfieEnviada': 1}, where: 'id = ?', whereArgs: [id]);
   }
 
   /// Marcações batidas hoje, em ordem cronológica.

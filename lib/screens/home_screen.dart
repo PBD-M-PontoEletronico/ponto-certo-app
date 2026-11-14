@@ -6,6 +6,10 @@ import '../services/localizacao_service.dart';
 import '../utils/uuid.dart';
 import 'login_screen.dart';
 import '../widgets/offline_banner.dart';
+import '../services/biometria_service.dart';
+import '../services/selfie_service.dart';
+import '../services/marcacao_service.dart';
+import 'dart:async' show unawaited;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -34,6 +38,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final SyncService _syncService = SyncService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final LocalizacaoService _localizacaoService = LocalizacaoService();
+  final BiometriaService _biometriaService = BiometriaService();
+  final SelfieService _selfieService = SelfieService();
+  final MarcacaoService _marcacaoService = MarcacaoService();
   List<Map<String, dynamic>> _escalas = [];
   List<Map<String, dynamic>> _turnos = [];
   List<Map<String, dynamic>> _marcacoesHoje = [];
@@ -264,8 +271,38 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => _batendoPonto = true);
 
-    // Grava no banco local ANTES de qualquer outra coisa. O envio ao
-    // servidor (com latitude/longitude) é escopo da APP 07.
+    // --- Biometria (APP 06): desbloqueia antes de registrar. Cancelamento
+    // explícito do usuário impede o registro; indisponibilidade de
+    // biometria no aparelho NÃO pode travar a marcação. ---
+    final resultadoBio = await _biometriaService.autenticar();
+    if (resultadoBio == ResultadoBiometria.cancelado) {
+      if (mounted) {
+        setState(() => _batendoPonto = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Confirmação cancelada. A marcação não foi registrada.')),
+        );
+      }
+      return;
+    }
+
+    // --- Selfie (APP 06): só quando a política do setor exige. ---
+    String? selfiePath;
+    final exigirSelfie = politica != null && politica['exigirSelfie'] == 1;
+    if (exigirSelfie) {
+      final resultadoSelfie = await _selfieService.capturarEComprimir();
+      if (resultadoSelfie.resultado != ResultadoSelfie.capturada) {
+        if (mounted) {
+          setState(() => _batendoPonto = false);
+          final msg = resultadoSelfie.mensagem ??
+              'Selfie não registrada. A marcação não foi registrada.';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+        }
+        return;
+      }
+      selfiePath = resultadoSelfie.caminho;
+    }
+
+    // Grava no banco local ANTES de qualquer envio.
     final marcacao = {
       'id': gerarUuidV4(),
       'tipo': tipo,
@@ -274,6 +311,10 @@ class _HomeScreenState extends State<HomeScreen> {
       'desvioRelogioMs': desvio,
       'latitude': lat,
       'longitude': lng,
+      'setorId': politica?['setorId'],
+      'metodoConfirmacao': exigirSelfie ? 'FOTO' : 'DIGITAL',
+      'digitalConfirmada': resultadoBio == ResultadoBiometria.autorizado ? 1 : 0,
+      'selfiePath': selfiePath,
     };
 
     await _dbHelper.inserirMarcacao(marcacao);
@@ -287,6 +328,10 @@ class _HomeScreenState extends State<HomeScreen> {
         SnackBar(content: Text('${_rotulos[tipo]} registrada às $horario.')),
       );
     }
+
+    // Dispara o envio sem travar a tela — offline-first: se falhar agora,
+    // tenta de novo na próxima sincronização.
+    unawaited(_marcacaoService.enviarPendentes());
   }
 
   String _formatarHorarioCompleto(DateTime d) =>
