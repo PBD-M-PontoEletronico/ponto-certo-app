@@ -2,9 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'auth_service.dart';
+import 'api_config.dart';
 import 'conectivity_service.dart' show ConnectivityService;
 import 'database_helper.dart';
 import 'marcacao_service.dart';
+import 'relogio_service.dart';
+import 'solicitacao_service.dart';
 
 /// Orquestra a sincronização de dados locais (APP 02), mede o desvio
 /// do relógio do aparelho em relação ao servidor (APP 04) e guarda a
@@ -17,7 +20,7 @@ class SyncService {
   final DatabaseHelper _dbHelper = DatabaseHelper();
 
   // mi static const String _baseUrl = 'http://192.168.0.4:8080';
-  static const String _baseUrl = 'http://192.168.1.131:8080';
+  static const String _baseUrl = kApiBaseUrl;
   static const Duration _timeout = Duration(seconds: 10);
 
   Future<bool> sincronizar() async {
@@ -29,6 +32,12 @@ class SyncService {
     final token = await _authService.getToken();
     if (token == null) {
       return false;
+    }
+
+    // APP 08: a conta do setor nao tem escala nem alocacao propria; o
+    // aparelho so baixa a lista de funcionarios do setor.
+    if (await _authService.getPerfil() == 'USUARIO_SETOR') {
+      return await RelogioService().sincronizar();
     }
 
     try {
@@ -169,6 +178,8 @@ class SyncService {
         final servidorMs = (abertura['horaServidorEpochMs'] as num).toInt();
         final aparelhoMs = (t0 + t1) ~/ 2;
         await _dbHelper.salvarDesvioRelogio(aparelhoMs - servidorMs);
+        // APP 10: a agenda dia a dia (com turnos e setor) fica no aparelho.
+        await _dbHelper.salvarCache('agenda', abertura['agenda'] ?? []);
         horaServidor = DateTime.fromMillisecondsSinceEpoch(servidorMs,
             isUtc: true)
             .toIso8601String();
@@ -190,6 +201,7 @@ class SyncService {
       );
 
       await MarcacaoService().enviarPendentes();
+      await SolicitacaoService().enviarPendentes();
 
       return true;
     } on TimeoutException catch (e, stack) {

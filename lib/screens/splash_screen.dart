@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 import 'login_screen.dart';
-import 'home_screen.dart';
+import 'porta_de_entrada.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -38,7 +38,7 @@ class _SplashScreenState extends State<SplashScreen> {
 
     if (temSessao) {
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => const PortaDeEntrada()),
       );
     } else {
       Navigator.of(context).pushReplacement(

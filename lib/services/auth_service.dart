@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../utils/uuid.dart';
+import 'api_config.dart';
 
 class AuthService {
   static const _storage = FlutterSecureStorage();
@@ -12,10 +14,12 @@ class AuthService {
   static const _usuarioKey = 'auth_usuario';
   static const _setoresIdsKey = 'auth_setores_ids';
   static const _dispositivoKey = 'auth_dispositivo_id';
+  static const _senhaHashKey = 'auth_senha_hash';
+  static const _senhaSaltKey = 'auth_senha_salt';
 
   // mistatic const String _baseUrl = 'http://192.168.0.4:8080';
 
-   static const String _baseUrl = 'http://192.168.1.108:8080';
+  static const String _baseUrl = kApiBaseUrl;
 
   //  Enquanto a API não estiver rodando, deixar true pra testar o fluxo.
   // Quando a API  estiver funcionando , mudar para false.
@@ -73,6 +77,11 @@ class AuthService {
             key: _setoresIdsKey,
             value: setoresIds.join(','),
           );
+          // Modo relogio (APP 08): guarda so um hash da senha do gestor,
+          // para conseguir exigi-la na saida do totem mesmo sem internet.
+          if (data['perfil'] == 'USUARIO_SETOR') {
+            await _guardarSenhaLocal(senha);
+          }
           return true;
         }
       }
@@ -132,6 +141,32 @@ class AuthService {
     return raw.split(',');
   }
 
+  /// true se a conta logada e a de um setor (aparelho vira relogio de ponto).
+  Future<bool> ehRelogio() async => (await getPerfil()) == 'USUARIO_SETOR';
+
+  String _hashSenha(String salt, String senha) =>
+      sha256.convert(utf8.encode('$salt:$senha')).toString();
+
+  Future<void> _guardarSenhaLocal(String senha) async {
+    final salt = gerarUuidV4();
+    await _storage.write(key: _senhaSaltKey, value: salt);
+    await _storage.write(key: _senhaHashKey, value: _hashSenha(salt, senha));
+  }
+
+  /// Confere a senha do gestor (conta do setor) para sair do modo relogio.
+  /// Offline, usa o hash guardado no login. Se nao houver hash (login feito
+  /// antes desta versao), confere com o servidor.
+  Future<bool> verificarSenhaDoGestor(String senha) async {
+    final salt = await _storage.read(key: _senhaSaltKey);
+    final hash = await _storage.read(key: _senhaHashKey);
+    if (salt != null && hash != null) {
+      return _hashSenha(salt, senha) == hash;
+    }
+    final usuario = await getUsuario();
+    if (usuario == null) return false;
+    return await login(usuario, senha);
+  }
+
   /// Remove todos os dados de sessão salvos (logout).
   /// O identificador do aparelho é mantido de propósito.
   Future<void> logout() async {
@@ -141,6 +176,8 @@ class AuthService {
     await _storage.delete(key: _empresaIdKey);
     await _storage.delete(key: _usuarioKey);
     await _storage.delete(key: _setoresIdsKey);
+    await _storage.delete(key: _senhaHashKey);
+    await _storage.delete(key: _senhaSaltKey);
   }
 
   /// Chamado quando a API responde que o token expirou (401/403).
