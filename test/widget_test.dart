@@ -1,30 +1,20 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:meu_ponto/main.dart';
+import 'package:meu_ponto/utils/formato.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  test('formatarMinutos mostra horas e minutos com sinal', () {
+    expect(formatarMinutos(510), '8h30');
+    expect(formatarMinutos(-75, sinal: true), '-1h15');
+    expect(formatarMinutos(30, sinal: true), '+0h30');
+    expect(formatarMinutos(null), '—');
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  test('chaveMes e dataIso seguem o formato da API', () {
+    expect(chaveMes(DateTime(2026, 11, 5)), '2026-11');
+    expect(dataIso(DateTime(2026, 11, 5)), '2026-11-05');
+  });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('horaCurta corta os segundos', () {
+    expect(horaCurta('08:00:00'), '08:00');
   });
 }

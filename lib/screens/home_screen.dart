@@ -6,6 +6,16 @@ import '../services/localizacao_service.dart';
 import '../utils/uuid.dart';
 import 'login_screen.dart';
 import '../widgets/offline_banner.dart';
+import '../services/biometria_service.dart';
+import '../services/selfie_service.dart';
+import '../services/marcacao_service.dart';
+import 'dart:async' show StreamSubscription, unawaited;
+import '../services/conectivity_service.dart';
+import '../widgets/fila_envio_card.dart';
+import '../services/solicitacao_service.dart';
+import 'espelho_screen.dart';
+import 'escala_screen.dart';
+import 'solicitacoes_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -34,6 +44,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final SyncService _syncService = SyncService();
   final DatabaseHelper _dbHelper = DatabaseHelper();
   final LocalizacaoService _localizacaoService = LocalizacaoService();
+  final BiometriaService _biometriaService = BiometriaService();
+  final SelfieService _selfieService = SelfieService();
+  final MarcacaoService _marcacaoService = MarcacaoService();
   List<Map<String, dynamic>> _escalas = [];
   List<Map<String, dynamic>> _turnos = [];
   List<Map<String, dynamic>> _marcacoesHoje = [];
@@ -49,10 +62,30 @@ class _HomeScreenState extends State<HomeScreen> {
   // Acima disso o app avisa. O card não define o número: combinar com o grupo.
   static const int _limiteDesvioMs = 5 * 60 * 1000; // 5 min
 
+  StreamSubscription<bool>? _conectividadeSub;
+
   @override
   void initState() {
     super.initState();
     _carregarDadosLocais();
+    // APP 07: ao abrir e sempre que a rede volta, a fila sobe sozinha.
+    unawaited(_marcacaoService.enviarPendentes());
+    unawaited(SolicitacaoService().enviarPendentes());
+    _conectividadeSub =
+        ConnectivityService().onConnectivityChanged().listen((online) {
+      if (online) {
+        unawaited(_marcacaoService.enviarPendentes());
+        unawaited(SolicitacaoService().enviarPendentes());
+      }
+    });
+    MarcacaoService.mudancas.addListener(_carregarDadosLocais);
+  }
+
+  @override
+  void dispose() {
+    _conectividadeSub?.cancel();
+    MarcacaoService.mudancas.removeListener(_carregarDadosLocais);
+    super.dispose();
   }
 
   Future<void> _carregarDadosLocais() async {
@@ -264,8 +297,42 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => _batendoPonto = true);
 
-    // Grava no banco local ANTES de qualquer outra coisa. O envio ao
-    // servidor (com latitude/longitude) é escopo da APP 07.
+    // --- Biometria (APP 06): desbloqueia antes de registrar. Cancelamento
+    // explícito do usuário impede o registro; indisponibilidade de
+    // biometria no aparelho NÃO pode travar a marcação. ---
+    final resultadoBio = await _biometriaService.autenticar();
+    if (resultadoBio == ResultadoBiometria.cancelado) {
+      if (mounted) {
+        setState(() => _batendoPonto = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Confirmação cancelada. A marcação não foi registrada.')),
+        );
+      }
+      return;
+    }
+
+    // --- Selfie (APP 06): só quando a política do setor exige. ---
+    String? selfiePath;
+    final exigirSelfie = politica != null && politica['exigirSelfie'] == 1;
+    if (exigirSelfie) {
+      final resultadoSelfie = await _selfieService.capturarEComprimir();
+      if (resultadoSelfie.resultado != ResultadoSelfie.capturada) {
+        if (mounted) {
+          setState(() => _batendoPonto = false);
+          final msg = resultadoSelfie.mensagem ??
+              'Selfie não registrada. A marcação não foi registrada.';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+        }
+        return;
+      }
+      selfiePath = resultadoSelfie.caminho;
+    }
+
+    // Grava no banco local ANTES de qualquer envio.
+    // "offline" = o toque aconteceu sem conexao (vai junto no envio).
+    final estavaOnline = await ConnectivityService().isOnline();
+    final idFuncionario =
+        (await _dbHelper.getFuncionario())?['id'] as String?;
     final marcacao = {
       'id': gerarUuidV4(),
       'tipo': tipo,
@@ -274,6 +341,16 @@ class _HomeScreenState extends State<HomeScreen> {
       'desvioRelogioMs': desvio,
       'latitude': lat,
       'longitude': lng,
+      'setorId': politica?['setorId'],
+      'metodoConfirmacao': exigirSelfie ? 'FOTO' : 'DIGITAL',
+      'digitalConfirmada': resultadoBio == ResultadoBiometria.autorizado ? 1 : 0,
+      'selfiePath': selfiePath,
+      'offline': estavaOnline ? 0 : 1,
+      // Dono da marcacao: evita que ela suba na conta de outra pessoa se o
+      // aparelho trocar de usuario antes do envio.
+      'usuarioId': (idFuncionario == null || idFuncionario.isEmpty)
+          ? null
+          : idFuncionario,
     };
 
     await _dbHelper.inserirMarcacao(marcacao);
@@ -287,6 +364,10 @@ class _HomeScreenState extends State<HomeScreen> {
         SnackBar(content: Text('${_rotulos[tipo]} registrada às $horario.')),
       );
     }
+
+    // Dispara o envio sem travar a tela — offline-first: se falhar agora,
+    // tenta de novo na próxima sincronização.
+    unawaited(_marcacaoService.enviarPendentes());
   }
 
   String _formatarHorarioCompleto(DateTime d) =>
@@ -329,6 +410,42 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Situacao da marcacao para o funcionario (APP 07): offline, enviada,
+  /// o que o servidor decidiu, ou falha.
+  String _sufixoSituacao(Map<String, dynamic> m) {
+    final partes = <String>[];
+    if ((m['offline'] as int? ?? 0) == 1) partes.add('batida offline');
+    if ((m['enviada'] as int? ?? 0) == 1) {
+      switch (m['statusServidor'] as String?) {
+        case 'VALIDA':
+          partes.add('válida');
+          break;
+        case 'PENDENTE_ANALISE':
+          partes.add('pendente de análise');
+          break;
+        case 'RECUSADA':
+          final motivo = m['motivoRecusa'] as String?;
+          partes.add(motivo == null || motivo.isEmpty
+              ? 'recusada'
+              : 'recusada: $motivo');
+          break;
+        default:
+          partes.add('enviada');
+      }
+    } else if ((m['falhaDefinitiva'] as int? ?? 0) == 1) {
+      partes.add('falha no envio');
+    } else {
+      partes.add('aguardando envio');
+    }
+    return '  (${partes.join(' - ')})';
+  }
+
+  void _abrir(Widget tela) {
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => tela))
+        .then((_) => _carregarDadosLocais());
+  }
+
   String _formatarHorario(String dataHoraIso) {
     final data = DateTime.tryParse(dataHoraIso);
     if (data == null) return '--:--';
@@ -353,7 +470,7 @@ class _HomeScreenState extends State<HomeScreen> {
             return Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(
-                '${_rotulos[tipo] ?? tipo}: $horario',
+                '${_rotulos[tipo] ?? tipo}: $horario${_sufixoSituacao(m)}',
                 style: const TextStyle(fontSize: 15),
               ),
             );
@@ -444,15 +561,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _confirmarLogout() async {
-    // 🔧 TAPA-BURACO PARA DEMONSTRAÇÃO — remover quando a fila real
-    // de envio de marcações (APP 07) existir. Por enquanto simula
-    // que existem 2 marcações pendentes de envio, sem olhar a
-    // tabela `marcacao` de verdade.
-    const int marcacoesPendentesMock = 2;
+    // APP 07: conta de verdade o que ainda nao subiu.
+    final int marcacoesPendentes = await _dbHelper.contarNaoEnviadas();
+    if (!mounted) return;
 
-    final temPendencias = marcacoesPendentesMock > 0;
+    final temPendencias = marcacoesPendentes > 0;
     final mensagem = temPendencias
-        ? 'Você tem $marcacoesPendentesMock marcação(ões) que ainda não foram '
+        ? 'Você tem $marcacoesPendentes marcação(ões) que ainda não foram '
         'enviadas ao servidor. Elas serão enviadas assim que você logar '
         'novamente com internet. Deseja mesmo sair?'
         : 'Tem certeza que deseja sair da sua conta?';
@@ -538,6 +653,31 @@ class _HomeScreenState extends State<HomeScreen> {
                       const Divider(),
                       const SizedBox(height: 8),
                       _buildSecaoPonto(),
+                      const SizedBox(height: 16),
+                      const FilaEnvioCard(),
+                      const SizedBox(height: 16),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.center,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () => _abrir(const EspelhoScreen()),
+                            icon: const Icon(Icons.history),
+                            label: const Text('Histórico'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () => _abrir(const EscalaScreen()),
+                            icon: const Icon(Icons.calendar_month),
+                            label: const Text('Minha escala'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () => _abrir(const SolicitacoesScreen()),
+                            icon: const Icon(Icons.fact_check_outlined),
+                            label: const Text('Meus pedidos'),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 24),
                       Text(
                         _ultimaSincronizacao != null
